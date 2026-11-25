@@ -1,0 +1,15 @@
+services:
+  api:
+    build:
+      args:
+        PDF2MD_TORCH_BUILD: cu130
+    environment:
+      DOCLING_DEVICE: cuda
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

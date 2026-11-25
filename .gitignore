@@ -1,0 +1,29 @@
+.DS_Store
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+/.aws/
+
+# Frontend build and dependencies
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Local conversion data and exports
+/data/
+/backend/data/
+/jobs/
+/backend/jobs/
+converted-document.zip

@@ -1,0 +1,24 @@
+services:
+  web:
+    build: ./frontend
+    ports:
+      - "${PDF2MD_WEB_BIND:-0.0.0.0}:${PDF2MD_WEB_PORT:-8085}:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+  api:
+    build: ./backend
+    cpus: ${PDF2MD_API_CPUS:-4}
+    mem_limit: ${PDF2MD_API_MEM_LIMIT:-16g}
+    volumes:
+      - pdf2md-data:/data
+      - docling-model-cache:/root/.cache
+    environment:
+      APP_DATA: /data
+      DOCLING_DEVICE: cpu
+      DOCLING_NUM_THREADS: "${PDF2MD_DOCLING_THREADS:-4}"
+      PDF2MD_CONVERSION_WORKERS: "${PDF2MD_CONVERSION_WORKERS:-1}"
+    restart: unless-stopped
+volumes:
+  pdf2md-data:
+  docling-model-cache:
