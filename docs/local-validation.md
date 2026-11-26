@@ -1,6 +1,6 @@
 # Local CPU validation
 
-Tested November 25, 2026 on an Intel Mac running macOS 15.7.9. The real Docling upload, review, edit, and ZIP export workflow passed. Full local acceptance remains open because the provenance, synchronized review, and unsaved-change objectives below did not all pass. DGX Spark deployment is gated on local acceptance.
+The November 25 baseline used an Intel Mac running macOS 15.7.9. The real Docling upload, review, edit, and ZIP export workflow passed. The tables preserve baseline results and the subsequent feature checks. A November 26 security-control rerun used Docling 2.151.1 with patched OpenJPEG and passed the real CPU conversion and browser tests. DGX Spark validation remains a separate gate.
 
 ## Test environment
 
@@ -10,18 +10,35 @@ Tested November 25, 2026 on an Intel Mac running macOS 15.7.9. The real Docling 
 
 ### Intel Mac setup
 
-The system Python 3.13 had no compatible upstream PyTorch wheel. In an isolated Python 3.12 environment, conda-forge supplied CPU PyTorch and the Intel Mac PDF parser. Docling 2.153.0 required parser 7.28.0, for which PyPI offered Apple Silicon wheels but no Intel wheel. The attempted source build failed because AppleClang could not find `cstdint`. The tested recipe below stays within the repository's dependency range and uses a prebuilt Intel parser. [PyTorch Intel Mac build announcement](https://dev-discuss.pytorch.org/t/pytorch-macos-x86-builds-deprecation-starting-january-2024/1690) · [Conda-forge PDF parser](https://anaconda.org/conda-forge/docling-parse)
+The system Python 3.13 had no compatible upstream PyTorch wheel. In a dedicated Python 3.12 environment, conda-forge supplied CPU PyTorch and the Intel Mac PDF parser. The available Intel `openjpeg` package in the test environment was affected by OSV-2025-219. For the rerun, an OpenJPEG build from the same fixed revision used by Docling Parse replaced the library in the dedicated environment. This matters for the conda builds of both Docling Parse and Pillow, which link dynamically to it. [PyTorch Intel Mac build announcement](https://dev-discuss.pytorch.org/t/pytorch-macos-x86-builds-deprecation-starting-january-2024/1690) · [OpenJPEG advisory](https://osv.dev/vulnerability/OSV-2025-219) · [Docling Parse native dependency pin](https://raw.githubusercontent.com/docling-project/docling-parse/v7.24.2/cmake/extlib_openjpeg.cmake).
 
 ```bash
 pdf2md_env=/absolute/path/to/new-test-env
 micromamba create -p "$pdf2md_env" --override-channels -c conda-forge \
   python=3.12 pip pytorch=2.14.1 torchvision=0.29.2 docling-parse=7.24.2
-"$pdf2md_env/bin/python" -m pip install -r backend/requirements.txt \
-  'docling==2.151.0' 'docling-parse==7.24.2'
+"$pdf2md_env/bin/python" -m pip install -r backend/requirements.txt
 "$pdf2md_env/bin/python" -m pip check
 ```
 
-## Automated results
+Use a vetted patched OpenJPEG build in this environment before running Docling. If the package manager still supplies the affected 2.5.4 build, the local validation used the following build in a disposable environment. CMake and the macOS command-line developer tools are needed for this optional build.
+
+```bash
+pdf2md_openjpeg=$(mktemp -d)
+curl -fL https://codeload.github.com/uclouvain/openjpeg/tar.gz/d33cbecc \
+  -o "$pdf2md_openjpeg/openjpeg.tar.gz"
+mkdir "$pdf2md_openjpeg/source"
+tar -xzf "$pdf2md_openjpeg/openjpeg.tar.gz" --strip-components 1 -C "$pdf2md_openjpeg/source"
+cmake -S "$pdf2md_openjpeg/source" -B "$pdf2md_openjpeg/build" \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_CODEC=OFF -DBUILD_TESTING=OFF \
+  -DCMAKE_INSTALL_NAME_DIR=@rpath -DCMAKE_INSTALL_PREFIX="$pdf2md_openjpeg/install"
+cmake --build "$pdf2md_openjpeg/build" --parallel 4
+cmake --install "$pdf2md_openjpeg/build"
+cp "$pdf2md_openjpeg/install/lib/libopenjp2.2.5.4.dylib" "$pdf2md_env/lib/"
+```
+
+The patched build still reports `2.5.4`. Keep the source revision with the test record. A package reinstall can restore the older library, so reverify the loaded build after updating the environment.
+
+## Automated baseline results
 
 | Check | Result |
 | --- | --- |

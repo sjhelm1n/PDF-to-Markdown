@@ -27,3 +27,6 @@ __pycache__/
 /jobs/
 /backend/jobs/
 converted-document.zip
+
+#Files
+security-audit.md

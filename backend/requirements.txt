@@ -1,4 +1,9 @@
-fastapi>=0.115,<1
-uvicorn[standard]>=0.30,<1
-python-multipart>=0.0.9,<1
-docling>=2.150,<3
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.34
+docling==2.151.1
+# Docling already installs these. Pin the patched image path and explicitly
+# declare the dependency used by the API's page-count preflight.
+docling-parse==7.24.2
+Pillow==13.0.0
+pypdfium2==5.15.2

@@ -1,14 +1,12 @@
 import hashlib
-import importlib
 import io
 import json
 import os
 import tempfile
-import threading
 import time
 import unittest
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,11 +17,29 @@ from app.engines.base import (
 )
 from app.engines.nemotron import NemotronAdapter
 from app.engines.registry import EngineRegistry
+from app.main import create_app
+from app.settings import Settings
 
 PNG = bytes.fromhex(
     '89504e470d0a1a0a0000000d4948445200000001000000010804000000b51c0c02'
     '0000000b4944415478da6364f80f00010501012718e3660000000049454e44ae426082'
 )
+
+
+def pdf_bytes(pages=1, comment=b''):
+    kids = b' '.join(f'{index + 3} 0 R'.encode() for index in range(pages))
+    objects = [b'<< /Type /Catalog /Pages 2 0 R >>',
+               b'<< /Type /Pages /Count %d /Kids [%s] >>' % (pages, kids)]
+    objects += [b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>'] * pages
+    contents = b'%PDF-1.4\n%' + comment + b'\n'
+    offsets = [0]
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(contents))
+        contents += b'%d 0 obj\n%s\nendobj\n' % (number, obj)
+    xref = len(contents)
+    contents += b'xref\n0 %d\n0000000000 65535 f \n' % len(offsets)
+    contents += b''.join(b'%010d 00000 n \n' % offset for offset in offsets[1:])
+    return contents + b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(offsets), xref)
 
 
 class FixtureAdapter(ConversionEngine):
@@ -51,33 +67,24 @@ class FixtureAdapter(ConversionEngine):
         )
 
 
-class EngineAPITests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        data = Path(cls.enterClassContext(tempfile.TemporaryDirectory()))
-        with patch.dict(os.environ, {'APP_DATA': str(data), 'PDF2MD_ENGINES': ''}):
-            main = importlib.import_module('app.main')
-        cls.main = main
-        cls.enterClassContext(patch.object(main, 'ROOT', data))
-        cls.enterClassContext(patch.object(main, 'MAX_BYTES', 256))
-        cls.enterClassContext(patch.object(main, 'ENGINES', EngineRegistry([
+class ApiTestCase(unittest.TestCase):
+    def setUp(self):
+        self.settings = Settings(Path(self.enterContext(tempfile.TemporaryDirectory())), pdf_bytes=16 * 1024)
+
+    def start(self, **limits):
+        self.app = create_app(replace(self.settings, **limits), EngineRegistry([
             FixtureAdapter(EngineConfig(options={'profile': 'fixture'})),
             NemotronAdapter(EngineConfig()),
-        ])))
-        (data / 'interrupted').mkdir()
-        interrupted = data / 'interrupted/status.json'
-        interrupted.write_text('{"state":"running"}', encoding='utf-8')
-
-        cls.client = cls.enterClassContext(TestClient(main.app))
-        cls.recovered = json.loads(interrupted.read_text())['state']
+        ]))
+        self.client = self.enterContext(TestClient(self.app))
 
     def request(self, method, path, body=None, headers=None):
         response = self.client.request(method, path, content=body, headers=headers)
         return response.status_code, response.content
 
-    def upload(self, engine='fixture', contents=b'%PDF-1.4\nfixture', filename='manual.pdf'):
+    def upload(self, engine='fixture', contents=None, filename='manual.pdf'):
         response = self.client.post('/api/jobs', params={'engine': engine}, files={
-            'file': (filename, contents, 'application/pdf'),
+            'file': (filename, pdf_bytes() if contents is None else contents, 'application/pdf'),
         })
         return response.status_code, response.content
 
@@ -92,8 +99,13 @@ class EngineAPITests(unittest.TestCase):
             time.sleep(0.01)
         self.fail('Conversion job never reached a terminal state')
 
+
+class EngineAPITests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.start()
+
     def test_discovery_and_health(self):
-        self.assertEqual(self.recovered, 'interrupted')
         code, data = self.request('GET', '/api/engines')
         self.assertEqual(code, 200)
         doc, placeholder = json.loads(data)['engines']
@@ -108,40 +120,11 @@ class EngineAPITests(unittest.TestCase):
 
     def test_conversion_worker_setting(self):
         with patch.dict(os.environ, clear=True):
-            self.assertEqual(self.main.conversion_worker_count(), 1)
-        with patch.dict(os.environ, {'PDF2MD_CONVERSION_WORKERS': '2'}):
-            self.assertEqual(self.main.conversion_worker_count(), 2)
-        for value in ('0', '-1', 'invalid'):
+            self.assertEqual(Settings.from_env().pdf_pages, 25)
+        for value in ('0', '-1', '2', 'invalid'):
             with self.subTest(value=value), patch.dict(os.environ, {'PDF2MD_CONVERSION_WORKERS': value}):
                 with self.assertRaisesRegex(ValueError, 'PDF2MD_CONVERSION_WORKERS'):
-                    self.main.conversion_worker_count()
-
-    def test_two_configured_workers_process_separate_jobs(self):
-        barrier = threading.Barrier(2, timeout=3)
-        convert = FixtureAdapter.convert
-        filenames = {}
-
-        def parallel_convert(adapter, pdf_path, workspace, *, source_filename=None):
-            filenames[workspace.name] = source_filename
-            barrier.wait()
-            return convert(adapter, pdf_path, workspace, source_filename=source_filename)
-
-        with (
-            patch.dict(os.environ, {'PDF2MD_CONVERSION_WORKERS': '2'}),
-            ThreadPoolExecutor(max_workers=self.main.conversion_worker_count()) as pool,
-            patch.object(self.main, 'POOL', pool),
-            patch.object(FixtureAdapter, 'convert', parallel_convert),
-        ):
-            jobs = []
-            for filename in ('archive/first.pdf', r'archive\second.pdf'):
-                code, payload = self.upload(filename=filename)
-                self.assertEqual(code, 202)
-                jobs.append(json.loads(payload)['id'])
-            self.assertNotEqual(*jobs)
-            for job_id, filename in zip(jobs, ('first.pdf', 'second.pdf')):
-                job = self.wait_for_job(job_id)
-                self.assertEqual((job['state'], job['filename']), ('complete', filename))
-                self.assertEqual(filenames[job_id], filename)
+                    Settings.from_env()
 
     def test_unsupported_engines_and_invalid_uploads(self):
         for engine, expected_status, expected_code in [
@@ -153,10 +136,10 @@ class EngineAPITests(unittest.TestCase):
                 self.assertEqual(json.loads(data)['detail']['code'], expected_code)
         self.assertEqual(self.upload(filename='wrong.txt')[0], 422)
         self.assertEqual(self.upload(contents=b'not a PDF')[0], 422)
-        self.assertEqual(self.upload(contents=b'%PDF-' + b'x' * 256)[0], 413)
+        self.assertEqual(self.upload(contents=b'%PDF-' + b'x' * self.settings.pdf_bytes)[0], 413)
 
     def test_selected_adapter_converts_and_preserves_edit_and_zip_flow(self):
-        code, payload = self.upload()
+        code, payload = self.upload(filename=r'archive\manual.pdf')
         self.assertEqual(code, 202)
         job_id = json.loads(payload)['id']
         job = self.wait_for_job(job_id)
@@ -165,7 +148,8 @@ class EngineAPITests(unittest.TestCase):
         self.assertEqual(job['engine_options'], {'profile': 'fixture'})
         self.assertEqual(job['pages'], ['# Fixture'])
         self.assertIsNone(job['images'][0]['source_page'])
-        self.assertEqual(self.request('GET', f'/api/jobs/{job_id}/pdf'), (200, b'%PDF-1.4\nfixture'))
+        self.assertEqual(job['filename'], 'manual.pdf')
+        self.assertEqual(self.request('GET', f'/api/jobs/{job_id}/pdf'), (200, pdf_bytes()))
         self.assertEqual(self.request('GET', f'/api/jobs/{job_id}/assets/figure.png'), (200, PNG))
         edited = job['markdown'] + '\nEdited.\n'
         self.assertEqual(self.request(
@@ -185,7 +169,7 @@ class EngineAPITests(unittest.TestCase):
             self.assertTrue(metadata['user_edited'])
             self.assertFalse(metadata['page_anchors_verified'])
             self.assertIsNotNone(metadata['saved_at'])
-            self.assertEqual(metadata['source_pdf_sha256'], hashlib.sha256(b'%PDF-1.4\nfixture').hexdigest())
+            self.assertEqual(metadata['source_pdf_sha256'], hashlib.sha256(pdf_bytes()).hexdigest())
             self.assertEqual(metadata['engine_options'], {'profile': 'fixture'})
             for name, expected in metadata['artifact_checksums'].items():
                 self.assertEqual(hashlib.sha256(exported.read(name)).hexdigest(), expected)
@@ -204,7 +188,7 @@ class EngineAPITests(unittest.TestCase):
                 self.client.put(f'/api/jobs/{job_id}/markdown', json={'markdown': f'![Figure]({unsafe})'}).raise_for_status()
                 self.assertEqual(self.client.get(f'/api/jobs/{job_id}/download').status_code, 409)
         self.client.put(f'/api/jobs/{job_id}/markdown', json={'markdown': job['markdown']}).raise_for_status()
-        (self.main.ROOT / job_id / 'images/figure.png').write_bytes(PNG + b'changed')
+        (self.settings.root / job_id / 'images/figure.png').write_bytes(PNG + b'changed')
         response = self.client.get(f'/api/jobs/{job_id}/download')
         self.assertEqual(response.status_code, 409)
         self.assertIn('checksum', response.json()['detail'])
@@ -215,7 +199,7 @@ class EngineAPITests(unittest.TestCase):
             (b'unexpected error', 'conversion_failed', 'Conversion failed. See server logs.'),
         ]:
             with self.subTest(failure=failure), self.assertLogs('app.main', level='WARNING'):
-                code, payload = self.upload(contents=b'%PDF-1.4\n' + failure)
+                code, payload = self.upload(contents=pdf_bytes(comment=failure))
                 self.assertEqual(code, 202)
                 job_id = json.loads(payload)['id']
                 job = self.wait_for_job(job_id)

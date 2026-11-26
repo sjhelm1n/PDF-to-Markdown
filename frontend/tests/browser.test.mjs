@@ -220,7 +220,7 @@ test('real Docling page editing, preview, and export preserve the complete draft
   assert.equal(evaluate(`${button('Download ZIP')}.disabled`), false)
 })
 
-test('a corrupt PDF surfaces a Docling failure and leaves export disabled', { skip: !pdf }, () => {
+test('a corrupt PDF is rejected before conversion and leaves export disabled', { skip: !pdf }, () => {
   browser('open', url)
   wait('document.querySelector("#conversion-engine")?.value === "docling"')
   evaluate(`(() => {
@@ -230,6 +230,6 @@ test('a corrupt PDF surfaces a Docling failure and leaves export disabled', { sk
   })()`)
   wait(`!${button('Convert PDF')}.disabled`)
   click('Convert PDF')
-  wait(`Array.from(document.querySelectorAll('[role=alert]')).some(alert => /Conversion failed|without pages/.test(alert.textContent))`)
+  wait(`Array.from(document.querySelectorAll('[role=alert]')).some(alert => /malformed or unsupported/.test(alert.textContent))`)
   assert.equal(evaluate(`${button('Download ZIP')}.disabled`), true)
 })

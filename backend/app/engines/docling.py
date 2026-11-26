@@ -166,9 +166,15 @@ class DoclingAdapter(ConversionEngine):
             if hasattr(options, 'use_embedded_picture_images'):
                 options.use_embedded_picture_images = True
             options.enable_remote_services = False
-            converter = converter_class(format_options={input_format.PDF: pdf_option(pipeline_options=options)})
+            converter = converter_class(
+                allowed_formats=[input_format.PDF],
+                format_options={input_format.PDF: pdf_option(pipeline_options=options)},
+            )
         try:
-            document = converter.convert(str(pdf_path)).document
+            converted = converter.convert(str(pdf_path), max_num_pages=int(self.config.options.get('max_num_pages', 25)))
+            if converted.status != 'success':
+                raise EngineError('conversion_failed', 'Docling could not convert every page successfully.')
+            document = converted.document
         except Exception as exc:
             self._converters.converter = None
             if isinstance(exc, (ImportError, FileNotFoundError)):

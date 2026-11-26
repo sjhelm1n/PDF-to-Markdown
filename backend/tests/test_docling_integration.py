@@ -1,5 +1,4 @@
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -17,7 +16,8 @@ from fastapi.testclient import TestClient
 
 from app.engines.base import EngineConfig
 from app.engines.docling import DoclingAdapter
-from app.engines.registry import configured_registry
+from app.main import create_app
+from app.settings import Settings
 
 
 def image_references(markdown):
@@ -38,10 +38,7 @@ class DoclingIntegrationTests(unittest.TestCase):
             'DOCLING_DEVICE': 'cpu',
             'PDF2MD_CONVERSION_WORKERS': '1',
         }))
-        main = importlib.import_module('app.main')
-        cls.enterClassContext(patch.object(main, 'ROOT', data))
-        cls.enterClassContext(patch.object(main, 'ENGINES', configured_registry()))
-        cls.client = cls.enterClassContext(TestClient(main.app))
+        cls.client = cls.enterClassContext(TestClient(create_app(Settings(data))))
 
     def submit(self, name, content):
         response = self.client.post('/api/jobs', params={'engine': 'docling'}, files={
@@ -66,7 +63,7 @@ class DoclingIntegrationTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             patch('docling.document_converter.DocumentConverter') as converter,
         ):
-            converter.return_value.convert.return_value = SimpleNamespace(document=document)
+            converter.return_value.convert.return_value = SimpleNamespace(document=document, status='success')
             workspace = Path(directory)
             return DoclingAdapter(EngineConfig()).convert(workspace / 'synthetic.pdf', workspace)
 
@@ -198,11 +195,11 @@ class DoclingIntegrationTests(unittest.TestCase):
         self.assertNotIn('Document control footer', result.markdown)
         self.assertEqual(result.markdown, '\n\n'.join((first, second, third)))
 
-    def test_corrupt_pdf_reaches_failed_state_and_cannot_export(self):
-        job_id = self.submit('corrupt.pdf', b'%PDF-1.4\ncorrupt document\n%%EOF\n')
-        job = self.wait_for_job(job_id)
-        self.assertEqual(job['state'], 'failed')
-        self.assertEqual(job['error_code'], 'conversion_failed')
-        self.assertTrue(job['error'])
-        self.assertEqual(self.client.get(f'/api/jobs/{job_id}/download').status_code, 409)
-        self.assertEqual(self.client.put(f'/api/jobs/{job_id}/markdown', json={'markdown': 'edit'}).status_code, 409)
+    def test_corrupt_pdf_is_rejected_before_docling_conversion(self):
+        with patch.object(DoclingAdapter, 'convert') as convert:
+            response = self.client.post('/api/jobs', files={
+                'file': ('corrupt.pdf', b'%PDF-1.4\ncorrupt document\n%%EOF\n', 'application/pdf'),
+            })
+            self.assertEqual(response.status_code, 422)
+            self.assertIn('malformed', response.json()['detail'])
+            convert.assert_not_called()

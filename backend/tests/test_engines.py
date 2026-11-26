@@ -91,12 +91,26 @@ class FigureFilenameTests(unittest.TestCase):
 
 
 class DoclingAdapterTests(unittest.TestCase):
+    def test_incomplete_docling_result_is_not_published(self):
+        document = Mock(pages={1: None})
+        result = SimpleNamespace(document=document, status='partial_success')
+        converter = Mock(return_value=Mock(convert=Mock(return_value=result)))
+        runtime = (SimpleNamespace(PDF='pdf'), Mock(), converter, Mock(), Mock(), Mock())
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch('app.engines.docling._load_runtime', return_value=runtime),
+        ):
+            workspace = Path(directory)
+            with self.assertRaisesRegex(EngineError, 'could not convert every page'):
+                DoclingAdapter(EngineConfig()).convert(workspace / 'input.pdf', workspace)
+        document._make_copy_with_refmode.assert_not_called()
+
     def test_worker_reuses_only_its_own_successful_converter(self):
         document = Mock(pages={1: None})
         document._make_copy_with_refmode.return_value = document
         document.iterate_items.return_value = []
         document.export_to_markdown.return_value = '# Document'
-        response = SimpleNamespace(document=document)
+        response = SimpleNamespace(document=document, status='success')
         first = Mock()
         first.convert.side_effect = [response, response, RuntimeError('conversion failed')]
         replacement = Mock()
@@ -124,9 +138,9 @@ class DoclingAdapterTests(unittest.TestCase):
             pool.submit(adapter.convert, workspace / 'four.pdf', workspace).result()
 
         self.assertEqual(factory.call_count, 3)
-        first.convert.assert_any_call(str(workspace / 'two.pdf'))
-        replacement.convert.assert_called_once_with(str(workspace / 'three.pdf'))
-        other_worker.convert.assert_called_once_with(str(workspace / 'four.pdf'))
+        first.convert.assert_any_call(str(workspace / 'two.pdf'), max_num_pages=25)
+        replacement.convert.assert_called_once_with(str(workspace / 'three.pdf'), max_num_pages=25)
+        other_worker.convert.assert_called_once_with(str(workspace / 'four.pdf'), max_num_pages=25)
 
     def test_docling_retains_pipeline_options_and_artifact_mapping(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -154,7 +168,9 @@ class DoclingAdapterTests(unittest.TestCase):
             document._make_copy_with_refmode.side_effect = prepare_references
             options = SimpleNamespace(use_embedded_picture_images=False, enable_remote_services=True)
             pipeline, pdf_option = Mock(return_value=options), Mock()
-            converter = Mock(return_value=Mock(convert=Mock(return_value=SimpleNamespace(document=document))))
+            converter = Mock(return_value=Mock(convert=Mock(return_value=SimpleNamespace(
+                document=document, status='success',
+            ))))
             runtime = (
                 SimpleNamespace(PDF='pdf'), pipeline, converter, pdf_option,
                 SimpleNamespace(REFERENCED='ref'), SimpleNamespace(LAYOUT='layout'),
@@ -171,7 +187,8 @@ class DoclingAdapterTests(unittest.TestCase):
             pipeline.assert_called_once_with(generate_picture_images=True, images_scale=3.0)
             self.assertTrue(options.use_embedded_picture_images)
             self.assertFalse(options.enable_remote_services)
-            converter.return_value.convert.assert_called_once_with(str(workspace / 'input.pdf'))
+            converter.return_value.convert.assert_called_once_with(str(workspace / 'input.pdf'), max_num_pages=25)
+            self.assertEqual(converter.call_args.kwargs['allowed_formats'], ['pdf'])
             document._make_copy_with_refmode.assert_called_once_with(
                 artifacts_dir=workspace / 'images', image_mode='ref', page_no=None, reference_path=workspace,
             )

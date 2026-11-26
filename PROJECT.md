@@ -2,7 +2,7 @@
 
 ## Document Status
 
-This file is the project-level product and architecture specification. It records the current implementation through Phase 1 and the remaining requirements for the MVP.
+This file is the project-level product and architecture specification. It records Phase 1, the application-level P1 controls, and the remaining MVP requirements.
 
 Status terms used below:
 
@@ -61,7 +61,7 @@ This is a two-service application, not a monorepo with independently versioned p
 
 1. The browser accepts a PDF by file picker or drag-and-drop and creates a local object URL for the PDF preview.
 2. The SPA queries `GET /api/engines`, selects an available engine, posts the PDF to `POST /api/jobs?engine=<id>`, and polls the returned job ID.
-3. FastAPI streams the PDF to a UUID-named directory under `APP_DATA`, validates its extension, size, and `%PDF-` prefix, and submits work to a bounded thread pool with one worker by default.
+3. FastAPI admits a bounded number of uploads and queued jobs, checks the streamed HTTP body before parsing, and saves the PDF under a UUID directory in `APP_DATA`. It validates the signature, file size, encryption state and page count before scheduling work on the single conversion worker.
 4. The worker invokes the selected adapter. Docling uses local conversion with remote services disabled, referenced picture images enabled, and an image scale of `3.0`.
 5. The worker stores full Markdown, per-page Markdown, PNG files, a basic image index, and JSON job status on disk.
 6. The SPA shows a paged PDF and per-page or full Markdown. The source editor follows the PDF page when the page excerpts reconstruct the full Markdown exactly.
@@ -73,7 +73,8 @@ This is a two-service application, not a monorepo with independently versioned p
 | --- | --- | --- |
 | Apache 2.0 open-source project | Implemented | `LICENSE` contains Apache 2.0 and `NOTICE` identifies the project. Third-party/model licenses remain separate. |
 | React/Vite SPA | Implemented | React 19, strict TypeScript, Vite, production Nginx container, and SPA fallback are configured. |
-| Drag-and-drop PDF upload | Implemented | File picker and drop target exist; the API streams input and enforces extension, signature, and a default 100 MiB limit. |
+| Drag-and-drop PDF upload | Implemented | File picker and drop target exist. The API bounds the multipart body and permits up to 100 MiB and 25 pages per PDF by default. Invalid or encrypted PDFs are rejected before inference. |
+| Admission, storage and retention | Implemented at application level | One conversion at a time, a bounded pending queue, a retained-file budget, expiry of terminal jobs and interrupted-state recovery. Native parser isolation and hard runtime limits are pending. |
 | Selectable conversion engines | Implemented | The SPA populates its selector from `GET /api/engines` and disables unavailable options. FastAPI checks availability again at submission. |
 | Docling conversion | Implemented | Docling 2.151.0 converted a real USGS PDF on the Intel Mac in CPU mode. Automated checks verified ZIP image links and PNG bytes. Markdown omits recognized running headers and footers, matching margin copies, and page counters verified against the PDF pagination. |
 | Modular adapter layer | Implemented | `backend/app/engines/` defines the conversion result, capabilities, configuration, typed errors, and registry. Job routes and the worker use the shared contract. |
@@ -366,12 +367,12 @@ Archive entries are emitted in deterministic lexical order with fixed safe relat
 - Documents and outputs remain on the deployed host and in the user's browser session.
 - Remote inference and remote Markdown images are disabled.
 - Inputs, IDs, paths, sizes, and archive names are validated; writes are confined to the job workspace and performed atomically.
-- The MVP is for a trusted local network. Authentication, rate limiting, malware scanning, HTTPS termination, retention policy, and hardened isolation are required before broader exposure.
+- The MVP is for a trusted local network. Broader exposure requires authentication, rate limiting, malware scanning, HTTPS termination, and hardened isolation. Job retention and application-level request and storage budgets are in place.
 
 ### Performance and Reliability
 
 - Upload and download handling is streamed or bounded to avoid unbounded memory use. ZIP generation should become streaming if realistic document sizes make the current in-memory approach unsafe.
-- Configure simultaneous conversions, Docling CPU threads, and API CPU and memory limits independently. Keep one API process and one simultaneous conversion by default. Raise concurrency only after testing the actual document workload alongside existing services. CPU and GPU draw from the Spark's shared memory, and container memory settings do not establish a separate GPU memory budget.
+- Use one API process and one simultaneous conversion. Pending-job count, Docling CPU threads, and existing Compose CPU and memory settings are configurable. CPU and GPU draw from the Spark's shared memory, and container memory settings do not establish a separate GPU memory budget.
 - Expensive engine/model initialization may be reused safely, without contaminating output across jobs.
 - Polling, restart recovery, and failures converge on clear terminal or recoverable states.
 - Large documents remain reviewable through pagination/virtualization or equivalent bounded rendering.
@@ -435,10 +436,10 @@ The MVP is accepted when all of the following are demonstrated:
 - Qualify the planned local Docling Nemotron profile against the [architecture decision](#nemotron-35-parse-architecture-decision) before enabling it.
 - Add other local engines through the same registry and adapter conformance suite.
 - Improve coordinate-level alignment for complex layouts, tables, repeated headers, footnotes, and figures while retaining page-level fallback.
-- Add cancellation and progress events to the resource-bounded worker that caches local models.
+- Isolate PDF preflight and conversion in a terminable local worker with hard time, memory, process and scratch-disk limits. Add running-job cancellation and check recovery from native parser failure.
 - Add configurable OCR and rasterization profiles whose exact values are recorded in export metadata.
 - Add batch conversion only after single-document determinism, resource controls, and review safety are established.
-- Add optional local authentication, retention controls, audit events, malware scanning, and HTTPS deployment guidance for environments beyond a trusted LAN.
+- Add optional local authentication, audit events, malware scanning, and HTTPS deployment guidance for environments beyond a trusted LAN.
 - Add richer archive validation and a standalone local pre-ingestion report for Open WebUI operators without creating direct Open WebUI integration.
 
 The following remain non-goals unless this specification is explicitly revised: a database, cloud inference, AI-authored technical interpretation, and direct Open WebUI integration.

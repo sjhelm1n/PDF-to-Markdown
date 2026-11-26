@@ -14,7 +14,11 @@ The target is a GB10 Grace Blackwell Superchip running NVIDIA DGX OS on Linux AR
 
 The development Mac passed the CPU checks for text, scanned, and table-heavy PDFs. The tested workflow includes page-level navigation and scrolling, saved-draft restoration, and ZIP manifest validation. Target hardware and container checks remain pending. [Local CPU validation report](local-validation.md)
 
-On the Spark, build both images natively and deploy the CPU stack through Portainer on a free port. Repeat the test PDF uploads, review, edit, and ZIP inspection to establish an ARM64 CPU baseline. Then build the CUDA API image and apply the GPU reservation. Check container GPU access, PyTorch and torchvision kernels, and Docling inference using the same PDFs. Record cold and repeat job time, export time, and peak memory on both stacks. Keep the CPU image available for rollback and repeat the resource check with Ollama active before increasing worker or thread limits.
+On the Spark, build both images natively and deploy the CPU stack through Portainer on a free port. Repeat the test PDF uploads, review, edit, and ZIP inspection to establish an ARM64 CPU baseline. Then build the CUDA API image and apply the GPU reservation. Check container GPU access, PyTorch and torchvision kernels, and Docling inference using the same PDFs. Record cold and repeat job time, export time, and peak memory on both stacks. Keep the CPU image available for rollback and repeat the resource check with Ollama active before increasing CPU thread limits.
+
+### Task 2 worker and container hardening
+
+Before processing untrusted PDFs on the Spark, move PDF preflight and Docling conversion to a terminable local worker. Enforce hard per-job time, memory and scratch limits and verify that a killed worker releases its job reservation while the API stays responsive. Run the worker with only its job workspace and approved model cache. Apply and verify least-privilege container settings, process and storage limits, and native dependency provenance on the actual ARM64 images. The current application limits retained job files and leaves temporary parsing, inference and export storage to these runtime controls.
 
 ## Host preflight
 
@@ -66,7 +70,7 @@ For a CPU API image, omit the build argument and use a distinct tag such as `pdf
 In Portainer, select the Spark's Docker Standalone endpoint and open **Stacks → Add stack → Web editor**. Use `pdf2md` as the stack name for a new deployment, or keep the existing stack name to preserve its volume names.
 
 1. Paste `compose.yaml`. Replace each service's `build:` entry with its `image:` reference. For images loaded on this Docker daemon, set `pull_policy: never` on both services. For registry images, use the published references and configure registry access in Portainer.
-2. For CUDA, use the API's `arm64-cu130` image and merge `environment` and `deploy.resources.reservations.devices` for `api` from `compose.gpu.yaml`. Retain the base API settings and volumes. For CPU, select the CPU API image and use the base `DOCLING_DEVICE: cpu` settings. Only `api` requests the NVIDIA GPU.
+2. For CUDA, use the API's `arm64-cu130` image and merge `environment` and `deploy.resources.reservations.devices` for `api` from `compose.gpu.yaml`. Retain the base API settings and volumes. For CPU, select the CPU API image and use the base `DOCLING_DEVICE: cpu` settings. The images select separate hash-pinned Python locks. Only `api` requests the NVIDIA GPU.
 3. Set the stack's environment variables as needed, then deploy. Publish only the web service. Nginx reaches `api:8000` on the stack network, so existing software can keep host port 8000.
 
 The local CLI equivalent for validating and building the GPU configuration is below. Use either Portainer or the CLI to manage a given stack. [Portainer stack setup](https://docs.portainer.io/user/docker/stacks/add) · [Docker Compose GPU reservations](https://docs.docker.com/compose/how-tos/gpu-support/)
@@ -85,9 +89,11 @@ docker compose -p pdf2md -f compose.yaml -f compose.gpu.yaml up -d --build
 | `PDF2MD_API_CPUS` | `4` | API CPU limit in cores. |
 | `PDF2MD_API_MEM_LIMIT` | `16g` | API container memory limit. Adjust for representative documents and host capacity. |
 | `PDF2MD_DOCLING_THREADS` | `4` | Sets Docling's `DOCLING_NUM_THREADS` for CPU inference work. |
-| `PDF2MD_CONVERSION_WORKERS` | `1` | Positive integer for simultaneous jobs inside the single API process. |
+| `PDF2MD_MAX_PENDING_JOBS` | `2` | Waiting admission capacity alongside the one conversion worker. |
+| `PDF2MD_MAX_PDF_PAGES` | `25` | Inclusive page limit before Docling inference. |
+| `PDF2MD_MAX_STORAGE_BYTES` | `2147483648` | Retained-job storage budget in bytes. |
 
-Treat the defaults as starting values. Keep one job at a time for initial qualification and test with Ollama active before raising concurrency. Each configured worker can retain its own model instance. Watch `docker stats --no-stream`, host memory with `free -h`, and `nvidia-smi` while running representative jobs. Reserving one GPU grants device access without allocating a dedicated share of GPU compute or unified memory.
+There is one conversion worker. Use the same upload and edit request limits for the API and Nginx, and set retention for the planned operating window. On the Spark, exercise 25- and 26-page uploads and oversized upload and edit requests through Nginx. Watch `docker stats --no-stream`, host memory with `free -h`, and `nvidia-smi` while running representative jobs with Ollama active. Reserving one GPU grants device access without allocating a dedicated share of GPU compute or unified memory. [Application settings](../README.md#upload-and-job-limits).
 
 The `pdf2md-data` volume backs `/data` for uploads, job state, Markdown, and assets. The separate `docling-model-cache` volume backs `/root/.cache` for downloaded model artifacts. Keep the project name and volume declarations stable across redeploys. Inspect the mounts and recreate a container to check data and cached models persist. Avoid volume deletion when removing or recreating containers. If operating offline, prepopulate the cache using the same pipeline before disconnecting. [Docling model preparation](https://docling-project.github.io/docling/usage/advanced_options/)
 

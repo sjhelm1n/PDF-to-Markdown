@@ -57,9 +57,9 @@ class EngineRegistry:
         )
 
 
-def configured_registry() -> EngineRegistry:
+def configured_registry(*, pdf_pages: int = 25) -> EngineRegistry:
     adapters = (
-        (DoclingAdapter, {'images_scale': 3.0}),
+        (DoclingAdapter, {'images_scale': 3.0, 'max_num_pages': pdf_pages}),
         (NemotronAdapter, {}),
     )
     configured = os.getenv('PDF2MD_ENGINES')
